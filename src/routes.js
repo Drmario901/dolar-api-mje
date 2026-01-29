@@ -10,10 +10,7 @@ const BCV_SELECTORS = {
 
 function nowVE() {
   const now = new Date()
-
-  const veDate = new Date(
-    now.toLocaleString('en-US', { timeZone: 'America/Caracas' })
-  )
+  const veDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/Caracas' }))
 
   return {
     iso: veDate.toISOString().replace('Z', '-04:00'),
@@ -42,6 +39,7 @@ export async function routes(fastify) {
 
       const usdtData = await scrapeUSDT({
         url: USDT_URL,
+        timeoutMs: 35000,
       })
 
       return {
@@ -49,8 +47,9 @@ export async function routes(fastify) {
         eur,
         usdt: usdtData.price_number,
 
-        bcvFetchedAt,                 
-        usdtReportedAt: usdtData.reportedAt, 
+        bcvFetchedAt,
+        usdtReportedAt: usdtData.reportedAt,
+
         timestamp: nowVE(),
       }
     } catch (err) {

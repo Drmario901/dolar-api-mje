@@ -17,10 +17,7 @@ export async function scrapeBCV({ url, selectors, timeoutMs = 20000 }) {
     for (const [key, selector] of Object.entries(selectors)) {
       await page.waitForSelector(selector, { timeout: timeoutMs })
       const raw = await page.$eval(selector, el => (el.textContent || '').trim())
-
-      result[key] = {
-        price_number: parseBcvNumber(raw),
-      }
+      result[key] = { price_number: parseBcvNumber(raw) }
     }
 
     return result
@@ -34,7 +31,7 @@ export async function scrapeUSDT({
   url,
   priceSelector = '#rate-value',
   dateSelector = '#summary-date',
-  timeoutMs = 30000,
+  timeoutMs = 25000,
 }) {
   const browser = await chromium.launch({ headless: true })
   const context = await browser.newContext({
@@ -45,7 +42,9 @@ export async function scrapeUSDT({
   const page = await context.newPage()
 
   try {
-    await page.goto(url, { waitUntil: 'networkidle', timeout: timeoutMs })
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+
+    await page.waitForTimeout(800)
 
     await page.waitForSelector(priceSelector, { timeout: timeoutMs })
 
@@ -67,7 +66,7 @@ export async function scrapeUSDT({
 
     let dateText = null
     try {
-      await page.waitForSelector(dateSelector, { timeout: 5000 })
+      await page.waitForSelector(dateSelector, { timeout: 4000 })
       dateText = await page.$eval(dateSelector, el => (el.textContent || '').trim())
       if (dateText?.toLowerCase().includes('cargando')) dateText = null
     } catch {}
@@ -86,7 +85,6 @@ function parseBcvNumber(text) {
   if (!text) return null
   const cleaned = text.replace(/[^\d.,]/g, '')
   if (!cleaned) return null
-
   const normalized = cleaned.replace(/\./g, '').replace(',', '.')
   const n = Number.parseFloat(normalized)
   return Number.isNaN(n) ? null : n
