@@ -6,7 +6,8 @@
   "main": "src/server.js",
   "scripts": {
     "dev": "node src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "jwt:mint": "node src/generate-jwt.js"
   },
   "keywords": [],
   "author": "",
@@ -14,7 +15,10 @@
   "packageManager": "pnpm@10.8.0",
   "dependencies": {
     "@fastify/cors": "^11.2.0",
+    "@fastify/jwt": "^10.0.0",
+    "dotenv": "^17.2.3",
     "fastify": "^5.7.2",
+    "jsonwebtoken": "^9.0.3",
     "playwright": "^1.58.0"
   }
 }
