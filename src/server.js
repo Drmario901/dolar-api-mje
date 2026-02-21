@@ -7,9 +7,14 @@ dotenv.config({ path: path.join(__dirname, '..', '.env') })
 
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
+import { initDb } from './db.js'
 import { routes } from './routes.js'
+import { startScheduler } from './scheduler.js'
 
 const fastify = Fastify({ logger: true })
+
+await initDb()
+startScheduler()
 
 await fastify.register(cors, { origin: '*' })
 await fastify.register(routes)
