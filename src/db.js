@@ -40,18 +40,19 @@ function createAdapter(nativeDb) {
 }
 
 let db = null
+let SQL = null
+let lastLoadedMtime = 0
 
-export async function initDb() {
-  const initSqlJs = (await import('sql.js')).default
-  const SQL = await initSqlJs()
-
-  if (fs.existsSync(dbPath)) {
-    const buf = fs.readFileSync(dbPath)
-    sqliteDb = new SQL.Database(buf)
-  } else {
-    sqliteDb = new SQL.Database()
+function loadDbFromBuffer(buf) {
+  sqliteDb = new SQL.Database(buf)
+  saveToFile = () => {
+    const data = sqliteDb.export()
+    fs.writeFileSync(dbPath, Buffer.from(data))
   }
+  db = createAdapter(sqliteDb)
+}
 
+function ensureSchema() {
   sqliteDb.run(`
     CREATE TABLE IF NOT EXISTS rate_snapshots (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,16 +67,41 @@ export async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_lookup
     ON rate_snapshots(source, currency, fetched_at)
   `)
+}
 
-  saveToFile = () => {
-    const data = sqliteDb.export();
-    fs.writeFileSync(dbPath, Buffer.from(data))
+export async function initDb() {
+  const initSqlJs = (await import('sql.js')).default
+  SQL = await initSqlJs()
+
+  if (fs.existsSync(dbPath)) {
+    const buf = fs.readFileSync(dbPath)
+    loadDbFromBuffer(buf)
+    lastLoadedMtime = fs.statSync(dbPath).mtimeMs
+  } else {
+    sqliteDb = new SQL.Database()
+    saveToFile = () => {
+      const data = sqliteDb.export()
+      fs.writeFileSync(dbPath, Buffer.from(data))
+    }
+    db = createAdapter(sqliteDb)
+    ensureSchema()
+    saveToFile()
+    lastLoadedMtime = fs.existsSync(dbPath) ? fs.statSync(dbPath).mtimeMs : 0
   }
+  ensureSchema()
+}
 
-  db = createAdapter(sqliteDb)
+function reloadFromDiskIfNewer() {
+  if (!fs.existsSync(dbPath)) return
+  const stat = fs.statSync(dbPath)
+  if (stat.mtimeMs <= lastLoadedMtime) return
+  const buf = fs.readFileSync(dbPath)
+  loadDbFromBuffer(buf)
+  lastLoadedMtime = stat.mtimeMs
 }
 
 export function getDb() {
   if (!db) throw new Error('DB not initialized. Call initDb() first.')
+  reloadFromDiskIfNewer()
   return db
 }
