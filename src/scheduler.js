@@ -1,6 +1,7 @@
 import cron from 'node-cron'
 import { scrapeBCV, scrapeUSDT } from './scraper.js'
-import { saveSnapshot, nowVE } from './ratesService.js'
+import { saveSnapshot, nowVE, getLatest } from './ratesService.js'
+import { sendBcvUpdatePush } from './onesignal.js'
 
 const BCV_URL = 'https://www.bcv.org.ve/glosario/cambio-oficial'
 const USDT_URL = 'https://dolitoday.com/graficos/usdt.html'
@@ -16,16 +17,23 @@ export function startScheduler() {
     '0 5 * * *',
     async () => {
       try {
+        const prevUsd = getLatest('bcv', 'usd')?.value
+        const prevEur = getLatest('bcv', 'eur')?.value
         const bcv = await scrapeBCV({
           url: BCV_URL,
           selectors: BCV_SELECTORS,
         })
         const fetchedAt = nowVE().toISOString()
-        if (bcv.usd?.price_number != null) {
-          saveSnapshot('bcv', 'usd', bcv.usd.price_number, fetchedAt)
-        }
-        if (bcv.eur?.price_number != null) {
-          saveSnapshot('bcv', 'eur', bcv.eur.price_number, fetchedAt)
+        const newUsd = bcv.usd?.price_number
+        const newEur = bcv.eur?.price_number
+        if (newUsd != null) saveSnapshot('bcv', 'usd', newUsd, fetchedAt)
+        if (newEur != null) saveSnapshot('bcv', 'eur', newEur, fetchedAt)
+        const changed =
+          (newUsd != null && newUsd !== prevUsd) ||
+          (newEur != null && newEur !== prevEur)
+        if (changed && (newUsd != null || newEur != null)) {
+          const result = await sendBcvUpdatePush({})
+          if (result.sent) console.log('[scheduler] Push enviado:', result.id)
         }
       } catch (err) {
         console.error('[scheduler] BCV error', err?.message || err)
