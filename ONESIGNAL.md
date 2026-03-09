@@ -1,6 +1,6 @@
 # OneSignal — Push al cambiar BCV
 
-Cuando el precio del BCV (USD o EUR) **cambia** respecto al último guardado, la API envía una notificación push a todos los suscriptores de OneSignal (segmento "Subscribed Users").
+Cuando el precio del BCV (USD o EUR) **cambia** respecto al último guardado, la API envía una notificación push a todos los usuarios de OneSignal (segmento "All").
 
 ## Configuración
 
@@ -27,4 +27,4 @@ Si `ONESIGNAL_APP_ID` o `ONESIGNAL_API_KEY` no están definidos, **no se envía 
 
 ## Segmento
 
-Se usa el segmento **"Subscribed Users"** por defecto. En el dashboard de OneSignal puedes crear otros segmentos y cambiar el valor en `src/onesignal.js` (`included_segments`) si lo necesitas.
+Se usa el segmento **"All"**. Si OneSignal devuelve *"All included players are not subscribed"*, no hay ningún dispositivo con push activo: asegúrate de que en tu app el usuario acepte notificaciones y que el token esté registrado en OneSignal. Puedes cambiar el segmento en `src/onesignal.js` (`included_segments`) si usas otro en el dashboard.

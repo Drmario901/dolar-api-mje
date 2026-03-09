@@ -37,9 +37,11 @@ if (newEur != null) {
 const bcvChanged =
   (newUsd != null && newUsd !== prevUsd) || (newEur != null && newEur !== prevEur)
 if (bcvChanged) {
+  console.log('  BCV cambió → enviando push...')
   const result = await sendBcvUpdatePush({})
-  if (result.sent) console.log('  Push enviado:', result.id)
-  else if (result.reason !== 'missing_config') console.log('  Push no enviado:', result.reason)
+  console.log('  Push result:', JSON.stringify(result, null, 2))
+  if (result.sent) console.log('  → Push enviado. ID:', result.id)
+  else console.log('  → Push NO enviado. reason:', result.reason, result.message || '', result.data ? 'data: ' + JSON.stringify(result.data) : '')
 }
 
 console.log('Scraping USDT...')

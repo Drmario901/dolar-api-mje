@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "node src/server.js",
     "start": "node src/server.js",
-    "scrape": "node src/scrape-now.js"
+    "scrape": "node src/scrape-now.js",
+    "push:test": "node src/push-test.js"
   },
   "keywords": [],
   "author": "",
