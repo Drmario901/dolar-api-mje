@@ -1,5 +1,29 @@
 import { chromium } from 'playwright'
 
+const BINANCE_P2P_URL =
+  'https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search'
+const BINANCE_ASSET = 'USDT'
+const BINANCE_FIAT = 'VES'
+const DEFAULT_BINANCE_ROWS = 20
+const DEFAULT_FILTERS = {
+  minPrice: 100,
+  maxPrice: 2000,
+  minDynamicMaxAmount: 100000,
+  minMonthOrders: 100,
+  minFinishRate: 0.95,
+  minPositiveRate: 0.98,
+  merchantOnly: false,
+}
+const STRICT_FILTERS = {
+  minPrice: 100,
+  maxPrice: 2000,
+  minDynamicMaxAmount: 1000000,
+  minMonthOrders: 1000,
+  minFinishRate: 0.98,
+  minPositiveRate: 0.99,
+  merchantOnly: true,
+}
+
 export async function scrapeBCV({ url, selectors, timeoutMs = 20000 }) {
   const browser = await chromium.launch({ headless: true })
   const context = await browser.newContext({
@@ -27,57 +51,34 @@ export async function scrapeBCV({ url, selectors, timeoutMs = 20000 }) {
   }
 }
 
-export async function scrapeUSDT({
-  url,
-  priceSelector = '#rate-value',
-  dateSelector = '#summary-date',
-  timeoutMs = 25000,
-}) {
-  const browser = await chromium.launch({ headless: true })
-  const context = await browser.newContext({
-    locale: 'es-VE',
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
-  })
-  const page = await context.newPage()
+export async function scrapeUSDT({ payType = 'PagoMovil', timeoutMs = 25000 } = {}) {
+  const requestBody = {
+    asset: BINANCE_ASSET,
+    fiat: BINANCE_FIAT,
+    tradeType: 'SELL',
+    page: 1,
+    rows: DEFAULT_BINANCE_ROWS,
+    payTypes: payType ? [payType] : [],
+    publisherType: null,
+  }
 
-  try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+  const json = await fetchBinanceP2P(requestBody, timeoutMs)
+  const rawAds = Array.isArray(json?.data) ? json.data : []
+  const normalizedAds = rawAds.map(normalizeAd)
+  const validAds = selectReferenceAds(normalizedAds)
+  const sortedAds = [...validAds].sort((a, b) => b.price - a.price)
+  const weightedPrice = weightedAverage(sortedAds)
+  const averagePrice = trimmedAverage(sortedAds.map(ad => ad.price))
+  const bestPrice = sortedAds[0]?.price ?? null
+  const finalPrice = weightedPrice ?? averagePrice ?? bestPrice
 
-    await page.waitForTimeout(800)
+  if (!Number.isFinite(finalPrice)) {
+    throw new Error('No se pudo calcular la tasa USDT desde Binance P2P')
+  }
 
-    await page.waitForSelector(priceSelector, { timeout: timeoutMs })
-
-    await page.waitForFunction(
-      sel => {
-        const el = document.querySelector(sel)
-        if (!el) return false
-        const t = (el.textContent || '').trim().toLowerCase()
-        if (!t) return false
-        if (t.includes('cargando')) return false
-        if (t.includes('-')) return false
-        return /\d/.test(t)
-      },
-      priceSelector,
-      { timeout: timeoutMs }
-    )
-
-    const priceRaw = await page.$eval(priceSelector, el => (el.textContent || '').trim())
-
-    let dateText = null
-    try {
-      await page.waitForSelector(dateSelector, { timeout: 4000 })
-      dateText = await page.$eval(dateSelector, el => (el.textContent || '').trim())
-      if (dateText?.toLowerCase().includes('cargando')) dateText = null
-    } catch {}
-
-    return {
-      price_number: parseDoliNumber(priceRaw),
-      reportedAt: dateText,
-    }
-  } finally {
-    await context.close()
-    await browser.close()
+  return {
+    price_number: finalPrice,
+    reportedAt: new Date().toISOString(),
   }
 }
 
@@ -90,26 +91,119 @@ function parseBcvNumber(text) {
   return Number.isNaN(n) ? null : n
 }
 
-function parseDoliNumber(text) {
-  if (!text) return null
-  const cleaned = text.replace(/[^\d.,]/g, '')
-  if (!cleaned) return null
+async function fetchBinanceP2P(body, timeoutMs) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
 
-  const hasDot = cleaned.includes('.')
-  const hasComma = cleaned.includes(',')
+  try {
+    const response = await fetch(BINANCE_P2P_URL, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'user-agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
 
-  let normalized = cleaned
-  if (hasDot && hasComma) {
-    const lastDot = cleaned.lastIndexOf('.')
-    const lastComma = cleaned.lastIndexOf(',')
-    normalized =
-      lastComma > lastDot
-        ? cleaned.replace(/\./g, '').replace(',', '.')
-        : cleaned.replace(/,/g, '')
-  } else if (hasComma) {
-    normalized = cleaned.replace(',', '.')
+    if (!response.ok) {
+      throw new Error(`Binance P2P HTTP ${response.status}`)
+    }
+
+    const json = await response.json()
+    assertBinanceSuccess(json)
+    return json
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function assertBinanceSuccess(json) {
+  const ok = json?.success === true || json?.code === '000000'
+  if (!ok) {
+    throw new Error(`Binance P2P error: ${JSON.stringify(json)}`)
+  }
+}
+
+function selectReferenceAds(ads) {
+  for (const filters of [STRICT_FILTERS, DEFAULT_FILTERS]) {
+    const validAds = removeOutliersByMedian(ads.filter(ad => isValidAd(ad, filters)))
+    if (validAds.length > 0) {
+      return validAds
+    }
   }
 
-  const n = Number.parseFloat(normalized)
-  return Number.isNaN(n) ? null : n
+  return []
+}
+
+function normalizeAd(item) {
+  const adv = item?.adv || {}
+  const advertiser = item?.advertiser || {}
+
+  return {
+    price: Number(adv.price),
+    minAmount: Number(adv.minSingleTransAmount || 0),
+    maxAmount: Number(adv.dynamicMaxSingleTransAmount || adv.maxSingleTransAmount || 0),
+    availableUSDT: Number(adv.dynamicMaxSingleTransQuantity || adv.tradableQuantity || 0),
+    advertiser: {
+      userType: advertiser.userType,
+      monthOrderCount: Number(advertiser.monthOrderCount || 0),
+      monthFinishRate: Number(advertiser.monthFinishRate || 0),
+      positiveRate: Number(advertiser.positiveRate || 0),
+    },
+  }
+}
+
+function isValidAd(ad, filters) {
+  if (!Number.isFinite(ad.price)) return false
+  if (ad.price < filters.minPrice) return false
+  if (ad.price > filters.maxPrice) return false
+  if (ad.maxAmount < filters.minDynamicMaxAmount) return false
+  if (ad.advertiser.monthOrderCount < filters.minMonthOrders) return false
+  if (ad.advertiser.monthFinishRate < filters.minFinishRate) return false
+  if (ad.advertiser.positiveRate < filters.minPositiveRate) return false
+  if (filters.merchantOnly && ad.advertiser.userType !== 'merchant') return false
+  return true
+}
+
+function removeOutliersByMedian(ads, maxDeviation = 0.08) {
+  if (!ads.length) return []
+
+  const prices = ads.map(ad => ad.price).sort((a, b) => a - b)
+  const mid = Math.floor(prices.length / 2)
+  const median =
+    prices.length % 2 === 1 ? prices[mid] : (prices[mid - 1] + prices[mid]) / 2
+
+  return ads.filter(ad => Math.abs(ad.price - median) / median <= maxDeviation)
+}
+
+function average(numbers) {
+  if (!numbers.length) return null
+  return numbers.reduce((sum, value) => sum + value, 0) / numbers.length
+}
+
+function trimmedAverage(numbers, trimRatio = 0.2) {
+  if (!numbers.length) return null
+
+  const sorted = [...numbers].sort((a, b) => a - b)
+  const trim = Math.floor(sorted.length * trimRatio)
+  const trimmed = sorted.slice(trim, sorted.length - trim)
+
+  return average(trimmed.length ? trimmed : sorted)
+}
+
+function weightedAverage(ads) {
+  if (!ads.length) return null
+
+  let weightedSum = 0
+  let totalWeight = 0
+
+  for (const ad of ads) {
+    const weight = Math.max(ad.maxAmount, 1)
+    weightedSum += ad.price * weight
+    totalWeight += weight
+  }
+
+  return totalWeight > 0 ? weightedSum / totalWeight : null
 }

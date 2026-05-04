@@ -1,7 +1,6 @@
 import { scrapeBCV, scrapeUSDT } from './scraper.js'
 
 const BCV_URL = 'https://www.bcv.org.ve/glosario/cambio-oficial'
-const USDT_URL = 'https://dolitoday.com/graficos/usdt.html'
 
 const BCV_SELECTORS = {
   usd: '#dolar strong',
@@ -37,10 +36,7 @@ export async function routes(fastify) {
         return reply.code(502).send({ error: 'No se pudo leer BCV' })
       }
 
-      const usdtData = await scrapeUSDT({
-        url: USDT_URL,
-        timeoutMs: 35000,
-      })
+      const usdtData = await scrapeUSDT({ timeoutMs: 35000 })
 
       return {
         usd,
