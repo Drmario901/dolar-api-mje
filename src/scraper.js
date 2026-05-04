@@ -51,11 +51,15 @@ export async function scrapeBCV({ url, selectors, timeoutMs = 20000 }) {
   }
 }
 
-export async function scrapeUSDT({ payType = 'PagoMovil', timeoutMs = 25000 } = {}) {
+export async function scrapeUSDT({
+  payType = 'PagoMovil',
+  referenceAmount = null,
+  timeoutMs = 25000,
+} = {}) {
   const requestBody = {
     asset: BINANCE_ASSET,
     fiat: BINANCE_FIAT,
-    tradeType: 'SELL',
+    tradeType: 'BUY',
     page: 1,
     rows: DEFAULT_BINANCE_ROWS,
     payTypes: payType ? [payType] : [],
@@ -65,12 +69,14 @@ export async function scrapeUSDT({ payType = 'PagoMovil', timeoutMs = 25000 } = 
   const json = await fetchBinanceP2P(requestBody, timeoutMs)
   const rawAds = Array.isArray(json?.data) ? json.data : []
   const normalizedAds = rawAds.map(normalizeAd)
-  const validAds = selectReferenceAds(normalizedAds)
-  const sortedAds = [...validAds].sort((a, b) => b.price - a.price)
-  const weightedPrice = weightedAverage(sortedAds)
+  const validAds = selectReferenceAds(normalizedAds, referenceAmount)
+  const sortedAds = [...validAds].sort((a, b) => a.price - b.price)
   const averagePrice = trimmedAverage(sortedAds.map(ad => ad.price))
+  const medianPrice = median(sortedAds.map(ad => ad.price))
   const bestPrice = sortedAds[0]?.price ?? null
-  const finalPrice = weightedPrice ?? averagePrice ?? bestPrice
+  const weightedPrice = weightedAverage(sortedAds)
+  const finalPrice =
+    medianPrice ?? averagePrice ?? bestPrice ?? weightedPrice
 
   if (!Number.isFinite(finalPrice)) {
     throw new Error('No se pudo calcular la tasa USDT desde Binance P2P')
@@ -126,15 +132,73 @@ function assertBinanceSuccess(json) {
   }
 }
 
-function selectReferenceAds(ads) {
+function selectReferenceAds(ads, referenceAmount) {
   for (const filters of [STRICT_FILTERS, DEFAULT_FILTERS]) {
-    const validAds = removeOutliersByMedian(ads.filter(ad => isValidAd(ad, filters)))
-    if (validAds.length > 0) {
-      return validAds
+    const filteredAds = ads.filter(ad => isValidAd(ad, filters, referenceAmount))
+    const amountMatchedAds = pickAdsForReferenceAmount(filteredAds, referenceAmount)
+    const clusteredAmountAds = removeOutliersByMedian(amountMatchedAds, 0.03)
+
+    if (clusteredAmountAds.length >= 3) {
+      return clusteredAmountAds
+    }
+
+    const clusteredFallbackAds = removeOutliersByMedian(filteredAds, 0.03)
+    if (clusteredFallbackAds.length >= 3) {
+      return Number.isFinite(referenceAmount) && referenceAmount > 0
+        ? pickClosestByAmount(clusteredFallbackAds, referenceAmount, 5)
+        : clusteredFallbackAds
     }
   }
 
   return []
+}
+
+function pickAdsForReferenceAmount(ads, referenceAmount) {
+  if (!Number.isFinite(referenceAmount) || referenceAmount <= 0) {
+    return ads
+  }
+
+  const matchingAds = ads.filter(
+    ad => ad.minAmount <= referenceAmount && ad.maxAmount >= referenceAmount
+  )
+
+  if (matchingAds.length >= 3) {
+    return pickClosestByAmount(matchingAds, referenceAmount, 5)
+  }
+
+  const nearbyAds = pickClosestByAmount(ads, referenceAmount, 6)
+
+  return matchingAds.length ? uniqueAds([...matchingAds, ...nearbyAds]) : nearbyAds
+}
+
+function rangeDistance(ad, referenceAmount) {
+  if (ad.minAmount <= referenceAmount && ad.maxAmount >= referenceAmount) {
+    return 0
+  }
+
+  if (referenceAmount < ad.minAmount) {
+    return ad.minAmount - referenceAmount
+  }
+
+  return referenceAmount - ad.maxAmount
+}
+
+function uniqueAds(ads) {
+  return [...new Set(ads)]
+}
+
+function pickClosestByAmount(ads, referenceAmount, limit) {
+  if (!Number.isFinite(referenceAmount) || referenceAmount <= 0) {
+    return ads.slice(0, limit)
+  }
+
+  return [...ads]
+    .sort((a, b) => {
+      const distance = rangeDistance(a, referenceAmount) - rangeDistance(b, referenceAmount)
+      if (distance !== 0) return distance
+      return a.price - b.price
+    })
+    .slice(0, Math.min(limit, ads.length))
 }
 
 function normalizeAd(item) {
@@ -155,11 +219,17 @@ function normalizeAd(item) {
   }
 }
 
-function isValidAd(ad, filters) {
+function isValidAd(ad, filters, referenceAmount) {
   if (!Number.isFinite(ad.price)) return false
   if (ad.price < filters.minPrice) return false
   if (ad.price > filters.maxPrice) return false
-  if (ad.maxAmount < filters.minDynamicMaxAmount) return false
+
+  const minRequiredAmount =
+    Number.isFinite(referenceAmount) && referenceAmount > 0
+      ? referenceAmount
+      : filters.minDynamicMaxAmount
+
+  if (ad.maxAmount < minRequiredAmount) return false
   if (ad.advertiser.monthOrderCount < filters.minMonthOrders) return false
   if (ad.advertiser.monthFinishRate < filters.minFinishRate) return false
   if (ad.advertiser.positiveRate < filters.minPositiveRate) return false
@@ -181,6 +251,13 @@ function removeOutliersByMedian(ads, maxDeviation = 0.08) {
 function average(numbers) {
   if (!numbers.length) return null
   return numbers.reduce((sum, value) => sum + value, 0) / numbers.length
+}
+
+function median(numbers) {
+  if (!numbers.length) return null
+  const sorted = [...numbers].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
 }
 
 function trimmedAverage(numbers, trimRatio = 0.2) {
