@@ -1,6 +1,7 @@
 import { scrapeBCV, scrapeUSDT } from './scraper.js'
 
 const BCV_URL = 'https://www.bcv.org.ve/glosario/cambio-oficial'
+const USDT_URL = 'https://dolitoday.com/graficos/usdt.html'
 
 const BCV_SELECTORS = {
   usd: '#dolar strong',
@@ -9,7 +10,10 @@ const BCV_SELECTORS = {
 
 function nowVE() {
   const now = new Date()
-  const veDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/Caracas' }))
+
+  const veDate = new Date(
+    now.toLocaleString('en-US', { timeZone: 'America/Caracas' })
+  )
 
   return {
     iso: veDate.toISOString().replace('Z', '-04:00'),
@@ -36,7 +40,9 @@ export async function routes(fastify) {
         return reply.code(502).send({ error: 'No se pudo leer BCV' })
       }
 
-      const usdtData = await scrapeUSDT({ timeoutMs: 35000 })
+      const usdtData = await scrapeUSDT({
+        url: USDT_URL,
+      })
 
       return {
         usd,
@@ -45,7 +51,6 @@ export async function routes(fastify) {
 
         bcvFetchedAt,
         usdtReportedAt: usdtData.reportedAt,
-
         timestamp: nowVE(),
       }
     } catch (err) {
