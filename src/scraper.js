@@ -2,9 +2,15 @@ import { chromium } from 'playwright'
 
 const BINANCE_P2P_URL =
   'https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search'
+const BINANCE_TRADE_URL =
+  'https://p2p.binance.com/es-LA/trade/all-payments/USDT?fiat=VES'
 const BINANCE_ASSET = 'USDT'
 const BINANCE_FIAT = 'VES'
 const DEFAULT_BINANCE_ROWS = 20
+const BINANCE_CACHE_TTL_MS = 15_000
+const BINANCE_STALE_TTL_MS = 5 * 60_000
+const DEFAULT_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
 const DEFAULT_FILTERS = {
   minPrice: 100,
   maxPrice: 2000,
@@ -24,12 +30,21 @@ const STRICT_FILTERS = {
   merchantOnly: true,
 }
 
+let sharedBrowserPromise = null
+let binanceSessionPromise = null
+let usdtCache = {
+  value: null,
+  expiresAt: 0,
+  staleUntil: 0,
+  pending: null,
+}
+
 export async function scrapeBCV({ url, selectors, timeoutMs = 20000 }) {
-  const browser = await chromium.launch({ headless: true })
+  const browser = await getSharedBrowser()
   const context = await browser.newContext({
     locale: 'es-VE',
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+    timezoneId: 'America/Caracas',
+    userAgent: DEFAULT_USER_AGENT,
   })
   const page = await context.newPage()
 
@@ -47,7 +62,6 @@ export async function scrapeBCV({ url, selectors, timeoutMs = 20000 }) {
     return result
   } finally {
     await context.close()
-    await browser.close()
   }
 }
 
@@ -56,6 +70,15 @@ export async function scrapeUSDT({
   referenceAmount = null,
   timeoutMs = 25000,
 } = {}) {
+  const now = Date.now()
+  if (usdtCache.value && now < usdtCache.expiresAt) {
+    return usdtCache.value
+  }
+
+  if (usdtCache.pending) {
+    return usdtCache.pending
+  }
+
   const requestBody = {
     asset: BINANCE_ASSET,
     fiat: BINANCE_FIAT,
@@ -66,26 +89,63 @@ export async function scrapeUSDT({
     publisherType: null,
   }
 
-  const json = await fetchBinanceP2P(requestBody, timeoutMs)
-  const rawAds = Array.isArray(json?.data) ? json.data : []
-  const normalizedAds = rawAds.map(normalizeAd)
-  const validAds = selectReferenceAds(normalizedAds, referenceAmount)
-  const sortedAds = [...validAds].sort((a, b) => a.price - b.price)
-  const averagePrice = trimmedAverage(sortedAds.map(ad => ad.price))
-  const medianPrice = median(sortedAds.map(ad => ad.price))
-  const bestPrice = sortedAds[0]?.price ?? null
-  const weightedPrice = weightedAverage(sortedAds)
-  const finalPrice =
-    medianPrice ?? averagePrice ?? bestPrice ?? weightedPrice
+  usdtCache.pending = (async () => {
+    try {
+      const json = await fetchBinanceP2P(requestBody, timeoutMs)
+      const rawAds = Array.isArray(json?.data) ? json.data : []
+      const normalizedAds = rawAds.map(normalizeAd)
+      const validAds = selectReferenceAds(normalizedAds, referenceAmount)
+      const sortedAds = [...validAds].sort((a, b) => a.price - b.price)
+      const averagePrice = trimmedAverage(sortedAds.map(ad => ad.price))
+      const medianPrice = median(sortedAds.map(ad => ad.price))
+      const bestPrice = sortedAds[0]?.price ?? null
+      const weightedPrice = weightedAverage(sortedAds)
+      const finalPrice =
+        medianPrice ?? averagePrice ?? bestPrice ?? weightedPrice
 
-  if (!Number.isFinite(finalPrice)) {
-    throw new Error('No se pudo calcular la tasa USDT desde Binance P2P')
+      if (!Number.isFinite(finalPrice)) {
+        throw new Error('No se pudo calcular la tasa USDT desde Binance P2P')
+      }
+
+      const result = {
+        price_number: finalPrice,
+        reportedAt: new Date().toISOString(),
+      }
+
+      usdtCache = {
+        value: result,
+        expiresAt: Date.now() + BINANCE_CACHE_TTL_MS,
+        staleUntil: Date.now() + BINANCE_STALE_TTL_MS,
+        pending: null,
+      }
+
+      return result
+    } catch (error) {
+      usdtCache.pending = null
+
+      if (usdtCache.value && Date.now() < usdtCache.staleUntil) {
+        return usdtCache.value
+      }
+
+      throw error
+    }
+  })()
+
+  return usdtCache.pending
+}
+
+async function getSharedBrowser() {
+  if (!sharedBrowserPromise) {
+    sharedBrowserPromise = chromium.launch({
+      headless: true,
+      args: ['--disable-blink-features=AutomationControlled'],
+    }).catch(error => {
+      sharedBrowserPromise = null
+      throw error
+    })
   }
 
-  return {
-    price_number: finalPrice,
-    reportedAt: new Date().toISOString(),
-  }
+  return sharedBrowserPromise
 }
 
 function parseBcvNumber(text) {
@@ -98,30 +158,101 @@ function parseBcvNumber(text) {
 }
 
 async function fetchBinanceP2P(body, timeoutMs) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const session = await getBinanceSession(timeoutMs)
+  const timer = setTimeout(() => {
+    session.page
+      .evaluate(() => window.stop())
+      .catch(() => {})
+  }, timeoutMs)
 
   try {
-    const response = await fetch(BINANCE_P2P_URL, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'user-agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
+    const responseData = await session.page.evaluate(async ({ url, requestBody }) => {
+      const response = await fetch(url, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          accept: 'application/json, text/plain, */*',
+          'content-type': 'application/json',
+          clienttype: 'web',
+        },
+        body: JSON.stringify(requestBody),
+      })
+
+      const text = await response.text()
+
+      return {
+        ok: response.ok,
+        status: response.status,
+        text,
+      }
+    }, {
+      url: BINANCE_P2P_URL,
+      requestBody: body,
     })
 
-    if (!response.ok) {
-      throw new Error(`Binance P2P HTTP ${response.status}`)
+    if (!responseData.ok) {
+      throw new Error(`Binance P2P HTTP ${responseData.status}`)
     }
 
-    const json = await response.json()
+    const json = JSON.parse(responseData.text)
     assertBinanceSuccess(json)
     return json
+  } catch (error) {
+    await resetBinanceSession()
+    throw error
   } finally {
     clearTimeout(timer)
+  }
+}
+
+async function getBinanceSession(timeoutMs) {
+  if (!binanceSessionPromise) {
+    binanceSessionPromise = createBinanceSession(timeoutMs).catch(error => {
+      binanceSessionPromise = null
+      throw error
+    })
+  }
+
+  return binanceSessionPromise
+}
+
+async function createBinanceSession(timeoutMs) {
+  const browser = await getSharedBrowser()
+  const context = await browser.newContext({
+    locale: 'es-VE',
+    timezoneId: 'America/Caracas',
+    userAgent: DEFAULT_USER_AGENT,
+    viewport: { width: 1440, height: 960 },
+    extraHTTPHeaders: {
+      'accept-language': 'es-VE,es;q=0.9,en;q=0.8',
+    },
+  })
+
+  const page = await context.newPage()
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined,
+    })
+  })
+  await page.goto(BINANCE_TRADE_URL, {
+    waitUntil: 'domcontentloaded',
+    timeout: timeoutMs,
+  })
+
+  return { context, page }
+}
+
+async function resetBinanceSession() {
+  if (!binanceSessionPromise) return
+
+  const sessionPromise = binanceSessionPromise
+  binanceSessionPromise = null
+
+  try {
+    const session = await sessionPromise
+    await session.context.close()
+  } catch {
+    // Ignore cleanup failures when rotating the browser session.
   }
 }
 
@@ -283,4 +414,22 @@ function weightedAverage(ads) {
   }
 
   return totalWeight > 0 ? weightedSum / totalWeight : null
+}
+
+process.once('SIGINT', shutdown)
+process.once('SIGTERM', shutdown)
+
+async function shutdown() {
+  const browserPromise = sharedBrowserPromise
+  sharedBrowserPromise = null
+  binanceSessionPromise = null
+
+  if (!browserPromise) return
+
+  try {
+    const browser = await browserPromise
+    await browser.close()
+  } catch {
+    // Ignore shutdown failures.
+  }
 }
